@@ -98,6 +98,7 @@ class World:
         self.scene, self.camera, self.renderer = scene, camera, renderer
         self.kinds, self.t, self.dt, self.hud = {}, 0.0, 0.0, ""
         self.keys, self.pressed, self.buttons, self.clicked, self.mouse = set(), set(), set(), set(), (0.0, 0.0)
+        self.mouse_delta = (0.0, 0.0)
         self._controller = None
 
     def __getattr__(self, name):
@@ -118,6 +119,13 @@ class World:
         """Mouse orbit/zoom camera control (created once, survives reloads)."""
         self._controller = self._controller or gfx.OrbitController(self.camera, register_events=self.renderer)
         self._controller.target = target
+
+    def capture_mouse(self, on=True):
+        """Hide and lock the cursor for mouse-look; ``w.mouse_delta`` keeps reporting motion."""
+        if window := getattr(self.renderer.target, "_window", None):
+            import glfw
+
+            glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_DISABLED if on else glfw.CURSOR_NORMAL)
 
     def mouse_ray(self):
         """World-space (origin, direction) of the ray under the mouse cursor."""

@@ -42,7 +42,7 @@ def run(path, snapshot=None, frames=180, size=(1280, 720)):
     hud, hud_camera = gfx.Scene().add(text), gfx.ScreenCoordsCamera(invert_y=True)
 
     w = World(scene, camera, renderer)
-    w.sun, w.background = sun, scene.children[0]
+    w.sun, w.background, w.ambient, w.text = sun, *scene.children[:2], text
     state = dict(game=None, error=None, last=time.perf_counter())
     changed = threading.Event()
     threading.Thread(target=lambda: [changed.set() for _ in watchfiles.watch(path.parent)], daemon=True).start()
@@ -79,7 +79,8 @@ def run(path, snapshot=None, frames=180, size=(1280, 720)):
         elif kind == "pointer_up":
             w.buttons.discard(e["button"])
         if "x" in e:
-            w.mouse = (e["x"], e["y"])
+            dx, dy = w.mouse_delta
+            w.mouse_delta, w.mouse = (dx + e["x"] - w.mouse[0], dy + e["y"] - w.mouse[1]), (e["x"], e["y"])
 
     def frame():
         now = time.perf_counter()
@@ -95,6 +96,7 @@ def run(path, snapshot=None, frames=180, size=(1280, 720)):
         renderer.render(scene, camera, flush=False)
         renderer.render(hud, hud_camera)
         w.pressed.clear(), w.clicked.clear()
+        w.mouse_delta = (0.0, 0.0)
 
     canvas.add_event_handler(on_event, "key_down", "key_up", "pointer_down", "pointer_up", "pointer_move")
     canvas.request_draw(frame)
