@@ -30,6 +30,12 @@ def update(w): ...  # per-frame logic. Only runs while playing.
 - **Game state:** any attribute you set on `w` (e.g. `w.score = 0`) is snapshotted on Play and restored on Stop.
 - **Snapshots:** `w.snapshot()` / `w.restore(s)` copy everything. `w.save(path)` / `w.load(path)` write and read the entity tables as `.npz`.
 
+## Collision (whole kinds at once; instances are oriented boxes from their mesh bounds)
+- `w.raycast(origin, direction, kinds=None, max_dist=inf)` returns the nearest `Hit(kind, index, dist, point, normal)`, or None. For mouse picking, use `w.raycast(*w.mouse_ray())`.
+- `w.overlaps(a, b, radius_a=None, radius_b=None)` returns index arrays `(i, j)` of touching sphere pairs. With `a == b`, each pair is returned once.
+- `w.push_out(mover, walls, radius=0.5)` slides spheres out of solid boxes. `mover` is a kind name (moved in place) or a point array (a moved copy is returned). It returns `(positions, normals)`.
+- Kinds can be passed as names or objects. Never loop over entities to collide them.
+
 ## Assets, materials, audio
 - `w.material(type="standard", filter="linear", **props)`: any `map`/`*_map` may be a file path (relative to the game) or an `(h, w, 4)` uint8 array. `filter="nearest"` gives crisp texels.
 - `w.texture(path_or_array, filter, srgb=True)` returns a `gfx.TextureMap`.
@@ -66,6 +72,9 @@ def update(w): ...  # per-frame logic. Only runs while playing.
 3. **Interactions between kinds** use broadcasting, e.g. `d = np.linalg.norm(a.pos[:, None] - b.pos[None], axis=-1)`.
 4. **Mutate columns in place, or assign the whole column.** `k.rot = new_array` writes into the table.
 
+## Shipping
+- `uv run lattice build game.py` writes `dist/game.exe` with every loaded asset bundled. Use `--console` to see print output.
+
 ## Verifying your work without a window
 ```sh
 uv run lattice play game.py --snapshot out.png --frames 120   # simulate 120 fixed 1/60 s frames, save the last one (a playable shot)
@@ -84,3 +93,6 @@ Complete examples:
 - `games/galaxy.py`: 30k entities.
 - `games/meadow.py`: a terrain, scatter and style showcase.
 - `games/megacity.py`: a neon city with traffic, rain and bloom.
+- `games/arena.py`: collision (`raycast`, `overlaps`, `push_out`).
+
+Run `uv run pytest` after engine changes: every game in `games/` is played headlessly and round-tripped through a playable screenshot.

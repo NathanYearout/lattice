@@ -24,12 +24,12 @@ def style_window(canvas, color=0x0D0B0B):
     ctypes.windll.user32.SetClassLongPtrW(hwnd, -10, ctypes.windll.gdi32.GetStockObject(4))  # GCLP_HBRBACKGROUND = black
 
 
-def play(path, snapshot=None, frames=180, size=(1280, 720)):
+def play(path, snapshot=None, frames=180, size=(1280, 720), title="lattice · $fps fps"):
     if snapshot:
         from rendercanvas.offscreen import RenderCanvas, loop
     else:
         from rendercanvas.glfw import RenderCanvas, loop
-    canvas = RenderCanvas(size=size, title="lattice · $fps fps", update_mode="continuous", max_fps=240)
+    canvas = RenderCanvas(size=size, title=title, update_mode="continuous", max_fps=240)
     style_window(canvas, 0)
     audio.mixer.enabled = not snapshot
     playable = shot.is_shot(path)
@@ -69,9 +69,17 @@ def main():
     r.add_argument("game", help="a game .py file, or a playable screenshot .png to resume")
     r.add_argument("--snapshot", metavar="PNG", help="render offscreen and save the last frame as a playable screenshot")
     r.add_argument("--frames", type=int, default=180, help="frames to simulate before a snapshot (default 180)")
+    b = sub.add_parser("build", help="export a game as a standalone executable (no Python needed to play)")
+    b.add_argument("game", help="path to a game .py file")
+    b.add_argument("--out", default="dist", help="output folder (default dist/)")
+    b.add_argument("--console", action="store_true", help="keep a console window for print() and errors")
     a = p.parse_args()
     if a.command == "play":
         return play(a.game, a.snapshot, a.frames)
+    if a.command == "build":
+        from .build import build
+
+        return build(a.game, a.out, a.console)
     from .editor import Editor
 
     Editor(getattr(a, "game", None), getattr(a, "snapshot", None)).run()

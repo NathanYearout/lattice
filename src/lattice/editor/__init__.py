@@ -205,6 +205,26 @@ class Editor:
         self.copy_play(target)
         self.preview(target)
 
+    def export(self):
+        """Build a standalone executable in a separate process (it takes a minute) so the editor stays responsive."""
+        import subprocess
+
+        out = self.rt.path.parent / "dist"
+        self.exporting = (subprocess.Popen([sys.executable, "-m", "lattice", "build", str(self.rt.path), "--out", str(out)],
+                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True), out / f"{self.rt.path.stem}.exe")
+        self.toast(I.PACKAGE, f"Exporting {self.rt.path.name}... (about a minute)")
+
+    def poll_export(self):
+        if (job := getattr(self, "exporting", None)) and job[0].poll() is not None:
+            self.exporting, (proc, exe) = None, job
+            if proc.returncode == 0:
+                self.toast(I.PACKAGE, f"Exported {exe.name} · ready to share", theme.OK)
+                self.console.log("info", f"Built {exe}")
+                os.startfile(exe.parent) if os.name == "nt" else None
+            else:
+                self.toast(I.CIRCLE_ALERT, "Export failed · see Console", theme.ERROR)
+                self.console.log("error", proc.stdout.read()[-4000:])
+
     def screenshot(self):
         if self.rt:
             self.grid.visible = self.box.visible = False
@@ -302,6 +322,7 @@ class Editor:
             self.dropped = None
             self.import_sound(Path(path)) if Path(path).suffix.lower() in audio.FILES else self.open(path)
         audio.mixer.paused = self.mode != "play"
+        self.poll_export()
         if self.rt:
             self.rt.poll()
             if self.mode == "play":
@@ -375,6 +396,8 @@ class Editor:
                 self.save_scene()
             if item(f"{I.CAMERA}  Playable Screenshot", "F12", bool(self.rt)):
                 self.screenshot()
+            if item(f"{I.PACKAGE}  Export Game (.exe)", "", bool(self.rt) and not getattr(self, "exporting", None)):
+                self.export()
             if item(f"{I.REFRESH_CW}  Restart Game", "", bool(self.rt)):
                 self.stop(), self.rt.reload(reset=True)
             imgui.separator()

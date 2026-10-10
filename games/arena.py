@@ -23,7 +23,6 @@ def scene(w):
     w.kind("chaser", gfx.box_geometry(0.9, 0.9, 0.9), "#ff4f6d", speed=0.0)
     w.kind("laser", gfx.box_geometry(), material="basic", shadow=False, life=0.0)
     fx.style(w, "cel")
-    w.renderer.effect_passes = [*w.renderer.effect_passes, fx.bloom(0.05)]
 
 
 def setup(w):

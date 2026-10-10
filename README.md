@@ -34,6 +34,8 @@ The demo galaxy simulates **30,000 tumbling, orbiting entities in 3 draw calls**
 | **One-word art direction** | `fx.style(w, "cel")` switches resolution, filtering, shading model and the whole post stack. There are ten styles, from `realistic` and `source` to `ps1`, `vhs` and `gameboy`. |
 | **Shaders in a few lines** | `fx.shader("color = ...")` turns a WGSL snippet into a hot-reloaded post effect. Bloom, outline, posterize/dither, chromatic aberration, scanlines, grading and palette mapping are already built in. |
 | **Materials, models, audio** | Choose a shading model by name (`basic`, `phong`, `toon`, `standard`, `physical`). Texture maps come from a file path or a NumPy array. glTF/GLB models import in one call. A NumPy mixer plays sound files, or arrays you synthesise yourself. |
+| **Collision and raycasts** | `w.raycast`, `w.overlaps` and `w.push_out` work on whole kinds at once. The broad phase uses scipy KD-trees and the exact tests use NumPy, so "which of 2,000 bullets hit which of 500 enemies" is one call. |
+| **Ship it** | `lattice build game.py`, or **File → Export Game**, produces a single `.exe` with the game and every asset it loads. Players don't need Python. |
 | **Per-instance colour** | Every kind has a `tint` column, so a thousand differently coloured signs are still one draw call. |
 | **Worlds from a seed** | `gen` has vectorised noise, terrain with height-ramp colours, scattering, palettes and city lots. A lush valley takes about 60 lines. |
 | **Stylised rendering built in** | PBR, shadows, fog, film grain, bloom and low-resolution pixel upscaling come from [pygfx](https://github.com/pygfx/pygfx) on WebGPU (Vulkan, Metal or DX12). |
@@ -46,6 +48,14 @@ The demo galaxy simulates **30,000 tumbling, orbiting entities in 3 draw calls**
 <tr>
 <td align="center"><b>Neo-Tokyo</b><br>A rain-soaked neon megacity, 13,000 lights in 14 draw calls.</td>
 <td align="center"><b>Meadow</b><br>A lush valley grown from one seed, in about 60 lines.</td>
+</tr>
+<tr>
+<td><img src="docs/arena.png" alt="Arena"></td>
+<td><img src="docs/editor_scene.png" alt="Editing Meadow"></td>
+</tr>
+<tr>
+<td align="center"><b>Arena</b><br>Walls, pickups, chasers and a laser: the collision API in about 100 lines.</td>
+<td align="center"><b>The editor</b><br>Gizmos, per-instance tint and live materials in the Scene view.</td>
 </tr>
 <tr>
 <td><img src="docs/liminal.png" alt="Fluorescent"></td>
@@ -134,6 +144,25 @@ crt = fx.shader("color = vec4f(color.rgb * (0.8 + 0.2 * sin(f32(px.y) * 3.14)) *
 
 A shader snippet edits `color` (linear RGBA). Inside it you can use `uv`, `px`, `res`, `t`, `depth`, `random()`, the input textures and your own uniforms (`crt.gain = 2` sets one live). A broken shader is reported on screen and in the console, and the game keeps running.
 
+## Collision
+
+Every instance is an oriented box (its mesh's bounds, posed by `pos`, `rot` and `scale`) or a sphere, and every query covers whole kinds:
+
+```python
+hit = w.raycast(*w.mouse_ray(), kinds=["wall", "enemy"])   # nearest hit: .kind .index .dist .point .normal
+i, j = w.overlaps("bullet", "enemy")                       # every touching pair, as index arrays
+w.enemy.hp[j] -= 1; w.bullet.kill(i)
+pos, normal = w.push_out("player", "wall", radius=0.5)     # slide out of solid boxes; normal[:, 1] > 0.7 means grounded
+```
+
+## Ship it
+
+```sh
+uv run lattice build games/megacity.py      # dist/megacity.exe, ~80 MB, runs anywhere with a GPU
+```
+
+The build runs your game headlessly once, to find every texture, model and sound it loads, then bundles them with the engine using [PyInstaller](https://pyinstaller.org). In the editor, **File → Export Game** does the same in the background and opens the folder when it's done. A built game also accepts `--snapshot out.png`, which renders a frame without opening a window, so you can check a build.
+
 ## Toolkit
 
 ```python
@@ -171,6 +200,8 @@ w.play(hum_array, loop=True, key="hum").volume = dread                     # key
 | `runtime.py` | ~120 | Loads a game, hot reload, error isolation, input, default lighting |
 | `fx.py` | ~160 | The WGSL shader builder, effect presets and the ten styles |
 | `gen.py` | ~110 | Noise, terrain, scattering, palettes, city lots |
+| `collide.py` | ~120 | Raycasts, overlaps and push-out over whole kinds |
+| `build.py` | ~70 | `lattice build`: standalone executables |
 | `shot.py` | ~80 | Playable screenshots |
 | `audio.py` | ~70 | A NumPy mixer on one sounddevice stream |
 | `app.py` | ~80 | The `lattice` command line |
@@ -198,7 +229,7 @@ With nothing selected, the **Inspector** edits the game's look: pixel size, filt
 
 The **Scene** view is a clean, lit editing view. The sparkle and sun toggles preview the game's post effects and lighting. The **Game** view shows exactly what players see.
 
-<div align="center"><img src="docs/editor_galaxy.png" alt="Editing the galaxy" width="85%"></div>
+<div align="center"><img src="docs/editor_code.png" alt="The built-in script editor" width="85%"></div>
 
 ### Design
 
@@ -215,9 +246,14 @@ The type is [IBM Plex](https://github.com/IBM/plex) and the icons are [Lucide](h
 ```
 lattice [edit] [game.py|shot.png] [--snapshot out.png]       open the editor (or screenshot it headlessly)
 lattice play game.py|shot.png [--snapshot out.png --frames N] play in a window (or save frame N as a playable shot)
+lattice build game.py [--out dist] [--console]               export a standalone executable
 ```
 
 Headless snapshots mean you, CI or an AI agent can check a game visually without a window. See [AGENTS.md](AGENTS.md).
+
+```sh
+uv run pytest      # collision and world unit tests, plus every example played headlessly and round-tripped through a shot
+```
 
 ## Roadmap
 
@@ -228,9 +264,10 @@ These came out of a research pass on what no other engine does yet:
 - [ ] **An MCP server and an in-editor agent.** A world that is deterministic, tabular and snapshot-able is the easiest thing in the world for an agent to query, test and branch.
 - [ ] **`lattice test`.** A fixed timestep, an engine-owned RNG, recorded input tapes and state hashes.
 - [ ] **Dialogue and level tools.** Branching dialogue as plain dicts with an in-editor graph view, and a brush/prefab painter that writes rows straight into kind tables.
-- [ ] **Physics.** Rigid bodies via an existing engine binding, one body table per kind.
+- [ ] **Physics.** Rigid-body dynamics via an existing engine binding, one body table per kind. Collision queries are already in.
+- [ ] **Controllers.** Ready-made FPS, orbit and fly cameras, gamepad input, and in-game menus through Dear ImGui.
 - [ ] Skinned glTF animation, and standalone builds via PyInstaller.
 
 ## Third-party licenses
 
-pygfx, wgpu-py and pylinalg are BSD-2-Clause. imgui-bundle, Dear ImGui, ImGuizmo, ImGuiColorTextEdit and watchfiles are MIT. NumPy is BSD-3-Clause. gltflib and sounddevice are MIT; soundfile and imageio are BSD; Pillow is MIT-CMU. Lucide icons are ISC ([license](src/lattice/assets/LUCIDE_LICENSE.txt)). IBM Plex is SIL OFL 1.1 ([license](src/lattice/assets/OFL.txt)).
+pygfx, wgpu-py and pylinalg are BSD-2-Clause. imgui-bundle, Dear ImGui, ImGuizmo, ImGuiColorTextEdit and watchfiles are MIT. NumPy and SciPy are BSD-3-Clause. PyInstaller is GPL-2.0 with an exception that allows distributing built games under any licence. gltflib and sounddevice are MIT; soundfile and imageio are BSD; Pillow is MIT-CMU. Lucide icons are ISC ([license](src/lattice/assets/LUCIDE_LICENSE.txt)). IBM Plex is SIL OFL 1.1 ([license](src/lattice/assets/OFL.txt)).
