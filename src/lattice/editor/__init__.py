@@ -116,7 +116,8 @@ class Editor:
                                                     axis_thickness=2), orientation="xz")
         self.box = gfx.BoxHelper(thickness=2, color=theme.ACCENT)
         self.scripts, self.script_tab, self.frame_ms, self.layout_done = {}, None, np.zeros(120, np.float32), (HOME / "layout.ini").exists()
-        self.recent = json.loads((HOME / "recent.json").read_text()) if (HOME / "recent.json").exists() else []
+        recent = json.loads((HOME / "recent.json").read_text()) if (HOME / "recent.json").exists() else []
+        self.recent = list(dict.fromkeys(p for p in recent if HOME not in Path(p).parents))  # unique; no unpacked shots
         self.last, self.focus_viewport = time.perf_counter(), True
         self.ensure_target((1280, 720))
         self.canvas.add_event_handler(self.on_event, "key_down", "key_up", "pointer_down", "pointer_up", "pointer_move", order=-100)
@@ -139,8 +140,8 @@ class Editor:
 
     # ------------------------------------------------------------------ project
     def open(self, path):
-        path, playable = Path(path).resolve(), shot.is_shot(path)
-        path = shot.unpack(path) if playable else path
+        source, playable = Path(path).resolve(), shot.is_shot(path)
+        path = shot.unpack(source) if playable else source
         if self.rt:
             self.stop() if self.mode != "edit" else None
             self.rt.close()
@@ -151,7 +152,7 @@ class Editor:
         cam = self.rt.world.camera  # the Scene view starts where the game camera looks from
         f = la.vec_transform_quat((0, 0, -1), cam.local.rotation)
         self.cam_pos, self.yaw, self.pitch = np.array(cam.local.position, float), float(np.arctan2(-f[0], -f[2])), float(np.arcsin(f[1]))
-        self.recent = [str(path)] + [p for p in self.recent if p != str(path)][:7]
+        self.recent = [str(source)] + [p for p in self.recent if p != str(source) and HOME not in Path(p).parents][:7]
         (HOME / "recent.json").write_text(json.dumps(self.recent))
         self.canvas.set_title(f"Lattice · {path.name}")
         self.edit_script(path)
@@ -356,7 +357,7 @@ class Editor:
                 self.open_dialog()
             if imgui.begin_menu(f"{I.HOUSE}  Recent", bool(self.recent)):
                 for p in self.recent:
-                    if item(Path(p).name + f"   {Path(p).parent.name}"):
+                    if item(f"{Path(p).name}   {Path(p).parent.name}###{p}"):
                         self.open(p)
                 imgui.end_menu()
             imgui.separator()
@@ -609,8 +610,8 @@ class Editor:
         dl.add_rect_filled(start, imgui.ImVec2(start.x + avail.x, start.y + avail.y), u32(theme.BG))
         for i in range(0, int(avail.y), 4):  # faint CRT scanlines
             dl.add_line(imgui.ImVec2(start.x, start.y + i), imgui.ImVec2(start.x + avail.x, start.y + i), u32("#ffffff", 0.012))
-        width = min(560, avail.x - 32)
-        imgui.set_cursor_screen_pos(imgui.ImVec2(start.x + (avail.x - width) / 2, start.y + max(avail.y * 0.16, 24)))
+        width = min(640, avail.x - 32)
+        imgui.set_cursor_screen_pos(imgui.ImVec2(start.x + (avail.x - width) / 2, start.y + max(avail.y * 0.1, 24)))
         imgui.begin_group()
         imgui.push_font(Fonts.title, 44)
         imgui.text_colored(hex4(theme.ACCENT), "LATTICE")
@@ -625,16 +626,20 @@ class Editor:
             self.open_dialog()
         imgui.dummy(imgui.ImVec2(0, 16))
         imgui.separator_text("Examples")
-        examples = (("liminal.py", I.GHOST, "Fluorescent", "PS2-era liminal horror. Don't look away."),
+        examples = (("megacity.py", I.BUILDING_2, "Neo-Tokyo", "Rain, neon and 13,000 lights."),
+                    ("meadow.py", I.MOUNTAIN, "Meadow", "A lush valley from one seed."),
+                    ("liminal.py", I.GHOST, "Fluorescent", "PS2-era liminal horror."),
                     ("galaxy.py", I.SPARKLES, "Galaxy", "30,000 entities, 3 draw calls."))
-        for file, icon, title, blurb in examples:
-            if (EXAMPLES / file).exists() and self.card(file, icon, title, blurb, width):
+        for i, (file, icon, title, blurb) in enumerate(e for e in examples if (EXAMPLES / e[0]).exists()):
+            imgui.same_line() if i % 2 else None
+            if self.card(file, icon, title, blurb, width / 2 - 4):
                 self.open(EXAMPLES / file)
         if self.recent:
             imgui.dummy(imgui.ImVec2(0, 8))
             imgui.separator_text("Recent")
             for p in self.recent[:5]:
-                if imgui.selectable(f"{I.FILE_CODE}   {Path(p).name}   ", False)[0]:
+                icon = I.CAMERA if p.lower().endswith(".png") else I.FILE_CODE
+                if imgui.selectable(f"{icon}   {Path(p).name}   ###{p}", False)[0]:
                     self.open(p)
                 imgui.same_line(), imgui.text_colored(hex4(theme.FAINT), str(Path(p).parent))
         imgui.end_group()
