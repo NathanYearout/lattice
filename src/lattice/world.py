@@ -1,7 +1,13 @@
 """Data-oriented world: each entity *kind* is a table of NumPy columns drawn as one GPU-instanced mesh."""
 
+import copy
+
 import numpy as np
 import pygfx as gfx
+
+
+def _copy(value):  # plain data is copied; GPU objects and the like are shared
+    return copy.deepcopy(value) if isinstance(value, (np.ndarray, list, dict, set, tuple)) else value
 
 BASE = dict(pos=(0.0, 0, 0), vel=(0.0, 0, 0), rot=(0.0, 0, 0, 1), scale=(1.0, 1, 1))
 
@@ -114,6 +120,30 @@ class World:
         else:
             self.kinds[name] = Kind(self.scene, geometry, material, columns)
         return self.kinds[name]
+
+    def snapshot(self):
+        """Copy all entity tables plus game-defined attributes. Powers Play/Stop, undo and scene files."""
+        tables = {n: {c: col[: k.n].copy() for c, col in k._cols.items()} for n, k in self.kinds.items()}
+        return tables, {key: _copy(v) for key, v in vars(self).items() if key not in self.__dict__.get("_engine", ())}
+
+    def restore(self, snapshot):
+        tables, attrs = snapshot
+        for name, cols in tables.items():
+            if k := self.kinds.get(name):
+                k.clear()
+                k.spawn(len(cols["pos"]), **cols)
+        vars(self).update({key: _copy(v) for key, v in attrs.items()})
+
+    def save(self, path):
+        np.savez_compressed(path, **{f"{n}.{c}": a for n, cols in self.snapshot()[0].items() for c, a in cols.items()})
+
+    def load(self, path):
+        tables = {}
+        with np.load(path) as f:
+            for key in f.files:
+                kind, col = key.split(".", 1)
+                tables.setdefault(kind, {})[col] = f[key]
+        self.restore((tables, {}))
 
     def orbit(self, target=(0, 0, 0)):
         """Mouse orbit/zoom camera control (created once, survives reloads)."""

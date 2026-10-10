@@ -1,106 +1,36 @@
-"""Runtime: opens a window, hot-reloads the game file on save, feeds input, and renders with pygfx/WebGPU."""
+"""Command line: ``lattice`` opens the editor, ``lattice play game.py`` runs a game in a plain window."""
 
 import argparse
-import importlib.util
-import threading
 import time
-import traceback
-from pathlib import Path
 
 import pygfx as gfx
-import watchfiles
 
-from .world import World
-
-KEYS = {" ": "space", "arrowup": "up", "arrowdown": "down", "arrowleft": "left", "arrowright": "right"}
+from .runtime import Runtime
 
 
-def load(path):
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def run(path, snapshot=None, frames=180, size=(1280, 720)):
-    path = Path(path).resolve()
+def play(path, snapshot=None, frames=180, size=(1280, 720)):
     if snapshot:
         from rendercanvas.offscreen import RenderCanvas, loop
     else:
         from rendercanvas.glfw import RenderCanvas, loop
-    canvas = RenderCanvas(size=size, title=f"lattice · {path.stem} · $fps fps", update_mode="continuous", max_fps=240)
-    renderer = gfx.WgpuRenderer(canvas)
-    scene, camera = gfx.Scene(), gfx.PerspectiveCamera(60, depth_range=(0.1, 2000))
-    sun = gfx.DirectionalLight(intensity=2.5, cast_shadow=True)
-    sun.local.position = (30, 60, 20)
-    sun.shadow.camera.width = sun.shadow.camera.height = 80
-    sun.shadow.bias = 0.001
-    scene.add(gfx.Background(None, gfx.BackgroundMaterial("#e8eef5", "#6d9ccf")), gfx.AmbientLight(intensity=0.7), sun, camera)
-    text = gfx.Text(markdown="", font_size=18, screen_space=True, anchor="top-left",
-                    material=gfx.TextMaterial(color="#fff", outline_color="#000", outline_thickness=0.3))
-    text.local.position = (16, 16, 0)
-    hud, hud_camera = gfx.Scene().add(text), gfx.ScreenCoordsCamera(invert_y=True)
-
-    w = World(scene, camera, renderer)
-    w.sun, w.background, w.ambient, w.text = sun, *scene.children[:2], text
-    state = dict(game=None, error=None, last=time.perf_counter())
-    changed = threading.Event()
-    threading.Thread(target=lambda: [changed.set() for _ in watchfiles.watch(path.parent)], daemon=True).start()
-
-    def call(hook, *args):
-        if fn := getattr(state["game"], hook, None):
-            try:
-                fn(*args)
-            except Exception:
-                state["error"] = f"**{hook}() failed** (fix and save to resume)\n\n" + traceback.format_exc(limit=-3)
-                print(state["error"])
-
-    def reload(reset=False):
-        try:
-            state["game"], state["error"] = load(path), None
-        except Exception:
-            state["error"] = "**load failed**\n\n" + traceback.format_exc(limit=-3)
-            return print(state["error"])
-        call("scene", w)  # appearance: re-run on every save
-        if reset:  # initial state: only on start / F5
-            [k.clear() for k in w.kinds.values()]
-            call("setup", w)
-        print(f"[lattice] {'started' if reset else 'reloaded'} {path.name}")
+    canvas = RenderCanvas(size=size, title="lattice · $fps fps", update_mode="continuous", max_fps=240)
+    rt = Runtime(path, gfx.WgpuRenderer(canvas))
+    last = [time.perf_counter()]
 
     def on_event(e):
-        kind, key = e["event_type"], KEYS.get(k := str(e.get("key", "")).lower(), k)
-        if kind == "key_down":
-            w.keys.add(key), w.pressed.add(key)
-            reload(reset=True) if key == "f5" else None
-        elif kind == "key_up":
-            w.keys.discard(key)
-        elif kind == "pointer_down":
-            w.buttons.add(e["button"]), w.clicked.add(e["button"])
-        elif kind == "pointer_up":
-            w.buttons.discard(e["button"])
-        if "x" in e:
-            dx, dy = w.mouse_delta
-            w.mouse_delta, w.mouse = (dx + e["x"] - w.mouse[0], dy + e["y"] - w.mouse[1]), (e["x"], e["y"])
+        rt.feed(e)
+        if e["event_type"] == "key_down" and e["key"] == "F5":
+            rt.reload(reset=True)
 
     def frame():
         now = time.perf_counter()
-        w.dt = 1 / 60 if snapshot else min(now - state["last"], 1 / 20)
-        w.t, state["last"] = w.t + w.dt, now
-        if changed.is_set():
-            changed.clear(), reload()
-        if not state["error"]:
-            call("update", w)
-        for k in w.kinds.values():
-            k.sync()
-        text.set_markdown(state["error"] or w.hud)
-        renderer.render(scene, camera, flush=False)
-        renderer.render(hud, hud_camera)
-        w.pressed.clear(), w.clicked.clear()
-        w.mouse_delta = (0.0, 0.0)
+        rt.poll()
+        rt.step(1 / 60 if snapshot else min(now - last[0], 1 / 20))
+        rt.render()
+        last[0] = now
 
     canvas.add_event_handler(on_event, "key_down", "key_up", "pointer_down", "pointer_up", "pointer_move")
     canvas.request_draw(frame)
-    reload(reset=True)
     if not snapshot:
         return loop.run()
     from PIL import Image
@@ -111,9 +41,18 @@ def run(path, snapshot=None, frames=180, size=(1280, 720)):
 
 
 def main():
-    p = argparse.ArgumentParser(prog="lattice", description="Run a lattice game file with live reload.")
-    p.add_argument("game", help="path to a game .py file")
-    p.add_argument("--snapshot", metavar="PNG", help="render offscreen and save the last frame instead of opening a window")
-    p.add_argument("--frames", type=int, default=180, help="frames to simulate before a snapshot (default 180)")
+    p = argparse.ArgumentParser(prog="lattice", description="Lattice: a data-oriented 3D game engine in Python.")
+    sub = p.add_subparsers(dest="command")
+    e = sub.add_parser("edit", help="open the editor (default)")
+    e.add_argument("game", nargs="?", help="game .py file to open")
+    e.add_argument("--snapshot", metavar="PNG", help="render the editor offscreen and save a screenshot")
+    r = sub.add_parser("play", help="run a game in a window with live reload")
+    r.add_argument("game", help="path to a game .py file")
+    r.add_argument("--snapshot", metavar="PNG", help="render offscreen and save the last frame instead")
+    r.add_argument("--frames", type=int, default=180, help="frames to simulate before a snapshot (default 180)")
     a = p.parse_args()
-    run(a.game, a.snapshot, a.frames)
+    if a.command == "play":
+        return play(a.game, a.snapshot, a.frames)
+    from .editor import Editor
+
+    Editor(getattr(a, "game", None), getattr(a, "snapshot", None)).run()

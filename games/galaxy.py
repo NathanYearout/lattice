@@ -35,6 +35,7 @@ def setup(w):
     w.camera.local.position = (0, 38, 62)
     w.camera.look_at((0, 0, 0))
     w.orbit()
+    update(w)  # place everything now, so the galaxy looks right in the editor before pressing Play
 
 
 def update(w):
