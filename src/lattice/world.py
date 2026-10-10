@@ -1,23 +1,63 @@
 """Data-oriented world: each entity *kind* is a table of NumPy columns drawn as one GPU-instanced mesh."""
 
 import copy
+from pathlib import Path
 
 import numpy as np
 import pygfx as gfx
+from pygfx.renderers.wgpu import load_wgsl
+from pygfx.renderers.wgpu.shaders import meshshader
+
+from . import audio
 
 
 def _copy(value):  # plain data is copied; GPU objects and the like are shared
     return copy.deepcopy(value) if isinstance(value, (np.ndarray, list, dict, set, tuple)) else value
 
-BASE = dict(pos=(0.0, 0, 0), vel=(0.0, 0, 0), rot=(0.0, 0, 0, 1), scale=(1.0, 1, 1))
+MATERIALS = dict(basic=gfx.MeshBasicMaterial, phong=gfx.MeshPhongMaterial, toon=gfx.MeshToonMaterial,
+                 standard=gfx.MeshStandardMaterial, physical=gfx.MeshPhysicalMaterial)
+_assets = {}
+KEEP = ("color", "map", "emissive", "emissive_map", "emissive_intensity", "opacity", "color_mode", "flat_shading", "side")
+
+
+def convert(material, cls):
+    """The same surface under another shading model (e.g. standard -> toon), keeping colours, maps and opacity."""
+    new = cls()
+    for attr in KEEP:
+        try:
+            setattr(new, attr, getattr(material, attr))
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return new
+BASE = dict(pos=(0.0, 0, 0), vel=(0.0, 0, 0), rot=(0.0, 0, 0, 1), scale=(1.0, 1, 1), tint=(1.0, 1, 1))
+TINT = {  # anchor line in pygfx's mesh.wgsl -> code inserted after it
+    "    global_id: u32,": "shade_r: f32, shade_g: f32, shade_b: f32,",
+    "        let pick_id = instance_info.global_id;":
+        "varyings.tint = vec3<f32>(1.0 - instance_info.shade_r, 1.0 - instance_info.shade_g, 1.0 - instance_info.shade_b);",
+    "    var emissive_color = srgb2physical(u_material.emissive_color.rgb) * u_material.emissive_intensity;":
+        "$$ if instanced\nemissive_color *= varyings.tint;\n$$ endif",
+    "    do_alpha_test(diffuse_color.a);": "$$ if instanced\ndiffuse_color = vec4<f32>(diffuse_color.rgb * varyings.tint, diffuse_color.a);\n$$ endif",
+}
+
+
+def _tinted_wgsl(name, *args):
+    """Per-instance colour for every pygfx mesh material. The tint lives in the instance struct's 12 padding bytes, stored as
+    (1 - tint) so untouched instances stay white: one kind, any number of colours, still one draw call."""
+    code = load_wgsl(name, *args)
+    for anchor, extra in TINT.items() if name == "mesh.wgsl" else ():
+        code = code.replace(anchor, f"{anchor}\n{extra}")
+    return code
+
+
+meshshader.load_wgsl = _tinted_wgsl
 
 
 class Kind:
     """A table of entities sharing a mesh and material. Columns are live views: ``k.pos += k.vel * w.dt``."""
 
-    def __init__(self, scene, geometry, material, columns):
+    def __init__(self, scene, geometry, material, columns, shadow=True):
         self.scene, self.n, self._cols, self._defaults, self.obj = scene, 0, {}, {}, None
-        self.look(geometry, material, columns)
+        self.look(geometry, material, columns, shadow)
 
     def __getattr__(self, name):
         if name in (cols := self.__dict__.get("_cols", {})):
@@ -34,9 +74,9 @@ class Kind:
     def __len__(self):
         return self.n
 
-    def look(self, geometry, material, columns):
+    def look(self, geometry, material, columns, shadow=True):
         """(Re)declare appearance and columns; existing entity data is kept (this is what makes hot reload work)."""
-        self.geometry, self.material = geometry, material
+        self.geometry, self.material, self.shadow = geometry, material, shadow
         for name, default in {**BASE, **columns}.items():
             self._defaults[name] = np.asarray(default, np.float32)
             self._cols.setdefault(name, None)
@@ -53,7 +93,7 @@ class Kind:
             self._cols[name] = new = np.broadcast_to(d, (cap, *d.shape)).copy()
             if col is not None:
                 new[: self.n] = col[: self.n]
-        self.obj = gfx.InstancedMesh(self.geometry, self.material, cap, cast_shadow=True, receive_shadow=True)
+        self.obj = gfx.InstancedMesh(self.geometry, self.material, cap, cast_shadow=self.shadow, receive_shadow=True)
         self.scene.remove(old) if old else None
         self.scene.add(self.obj)
 
@@ -93,6 +133,7 @@ class Kind:
         m = buf.data["matrix"]  # stored column-major, i.e. transposed
         m[:n, :3, :3] = (r * self.scale[:, None, :]).transpose(0, 2, 1)
         m[:n, 3, :3] = self.pos
+        buf.data["_12_bytes_padding"][:n].view(np.float32)[:] = 1 - np.clip(self.tint, 0, None) ** 2.2  # sRGB in, linear out
         buf.draw_range = (0, n)
         buf.update_range(0, n)
 
@@ -105,21 +146,60 @@ class World:
         self.kinds, self.t, self.dt, self.hud = {}, 0.0, 0.0, ""
         self.keys, self.pressed, self.buttons, self.clicked, self.mouse = set(), set(), set(), set(), (0.0, 0.0)
         self.mouse_delta = (0.0, 0.0)
-        self._controller = None
+        self._controller, self.root, self.files, self.canvas = None, Path.cwd(), set(), None
 
     def __getattr__(self, name):
         if name in (kinds := self.__dict__.get("kinds", {})):
             return kinds[name]
         raise AttributeError(name)
 
-    def kind(self, name, geometry, color="#ffffff", material=None, **columns):
-        """Declare (or live-update) an entity kind with extra columns given as defaults, e.g. ``hp=3.0``."""
-        material = material or gfx.MeshStandardMaterial(color=color)
+    def kind(self, name, geometry, color="#ffffff", material=None, shadow=True, **columns):
+        """Declare (or live-update) an entity kind with extra columns given as defaults, e.g. ``hp=3.0``.
+        ``shadow=False`` stops it casting shadows (clouds, particles, glowing things)."""
+        material = self.material(material or "standard", color=color) if isinstance(material, (str, type(None))) else material
         if name in self.kinds:
-            self.kinds[name].look(geometry, material, columns)
+            self.kinds[name].look(geometry, material, columns, shadow)
         else:
-            self.kinds[name] = Kind(self.scene, geometry, material, columns)
+            self.kinds[name] = Kind(self.scene, geometry, material, columns, shadow)
         return self.kinds[name]
+
+    def asset(self, path, load, *variant):
+        """Load a file relative to the game once (reloaded when it changes on disk). Used files travel with screenshots."""
+        path = (self.root / path).resolve()
+        self.files.add(path)
+        key = (path, path.stat().st_mtime, *variant)
+        if key not in _assets:
+            _assets[key] = load(path)
+        return _assets[key]
+
+    def texture(self, image, filter="linear", srgb=True):
+        """An image file (or an (h, w, 4) uint8 array) as a texture map; ``filter="nearest"`` keeps texels crisp for a retro look."""
+        from PIL import Image
+
+        make = lambda a: gfx.Texture(np.ascontiguousarray(a), dim=2, colorspace="srgb" if srgb else "physical", generate_mipmaps=True)
+        tex = make(image) if isinstance(image, np.ndarray) else self.asset(image, lambda p: make(Image.open(p).convert("RGBA")), srgb)
+        return gfx.TextureMap(tex, filter=filter)
+
+    def material(self, type="standard", filter="linear", **props):
+        """A material by name: basic (unlit), phong, toon, standard (PBR) or physical. Any ``map``/``*_map`` given as a
+        file path is loaded as a texture: ``w.material("toon", color="#fff", map="brick.png", filter="nearest")``."""
+        for key, value in props.items():
+            if key.endswith("map") and isinstance(value, (str, Path, np.ndarray)):
+                props[key] = self.texture(value, filter, srgb=key in ("map", "emissive_map"))
+        return MATERIALS[type](**props)
+
+    def model(self, path):
+        """Geometry and material of the first mesh in a glTF/GLB file: ``w.kind("crate", **w.model("crate.glb"))``."""
+        mesh = self.asset(path, lambda p: gfx.load_gltf_mesh(str(p), quiet=True)[0])
+        return dict(geometry=mesh.geometry, material=mesh.material)
+
+    def play(self, sound, volume=1.0, loop=False, key=None):
+        """Play a sound file, or a NumPy sample array (mono or stereo, 44.1 kHz). Returns a voice with live ``.volume``
+        and ``.stop()``. With a ``key`` it starts once and later calls return the same voice, so it is safe every frame."""
+        if key and (v := audio.mixer.keyed.get(key)) and v.playing:
+            return v
+        data = self.asset(sound, audio.load) if isinstance(sound, (str, Path)) else audio.as_stereo(sound)
+        return audio.mixer.play(data, volume, loop, key)
 
     def snapshot(self):
         """Copy all entity tables plus game-defined attributes. Powers Play/Stop, undo and scene files."""
@@ -152,7 +232,7 @@ class World:
 
     def capture_mouse(self, on=True):
         """Hide and lock the cursor for mouse-look; ``w.mouse_delta`` keeps reporting motion."""
-        if window := getattr(self.renderer.target, "_window", None):
+        if window := getattr(self.canvas or self.renderer.target, "_window", None):
             import glfw
 
             glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_DISABLED if on else glfw.CURSOR_NORMAL)

@@ -10,6 +10,8 @@ import numpy as np
 import pygfx as gfx
 import pylinalg as la
 
+from lattice import fx
+
 GRID, CELL, HEIGHT, RADIUS = 16, 4.0, 3.0, 0.3
 FOG, SEED = "#1e1b0f", 13
 HALF = GRID * CELL / 2
@@ -20,10 +22,8 @@ def solid(color, **kw):
 
 
 def scene(w):
-    r = w.renderer  # the PS2 look: low internal resolution, nearest upscale, depth fog, film grain
-    r.pixel_ratio, r.pixel_filter, r.ppaa = 0.3, "nearest", "none"
-    fog = gfx.Color(*gfx.Color(FOG).to_physical())  # effect passes work in linear colour
-    r.effect_passes = [gfx.renderers.wgpu.FogPass(fog, power=28), gfx.renderers.wgpu.NoisePass(0.04)]
+    fx.retro(w.renderer, 0.3)  # the PS2 look: low internal resolution, nearest upscale, depth fog, film grain
+    w.renderer.effect_passes = [fx.fog(FOG, 28), fx.noise(0.04)]
     w.text.font_size = 40
     w.sun.intensity, w.sun.cast_shadow, w.ambient.intensity = 0.0, False, 0.3
     w.camera.fov, w.camera.depth_range = 72, (0.05, 80)
@@ -119,6 +119,7 @@ def lights(w, dread):
     off = (lamp.dead > 0) | (buzz > 0.97 - dread * 0.6)
     lamp.scale = np.where(off[:, None], 0, (1.2, 0.02, 0.6))
     w.torch.intensity = 6 * (1 - dread * 0.7) * (0.25 if np.sin(w.t * 23) > 0.9 - dread else 1)
+    w.play(HUM, loop=True, key="hum").volume = 0.25 + dread * 0.75 * (0.3 if np.sin(w.t * 23) > 0.9 - dread else 1)
 
 
 def update(w):
@@ -134,3 +135,14 @@ def update(w):
     if np.linalg.norm((w.me - w.door.pos[0])[[0, 2]]) < 1.4:
         w.state = "escaped"
     w.hud = "*the lights hum. find the exit.*" if w.clock < 6 else ""
+
+
+def _hum(seconds=2.0, rate=44100):
+    """Fluorescent tubes: a 120 Hz mains buzz with harmonics and a little crackle. Loops seamlessly."""
+    t = np.arange(int(seconds * rate)) / rate
+    buzz = sum(np.sin(2 * np.pi * 120 * k * t) / k ** 1.5 for k in (1, 2, 3, 5, 7))
+    crackle = np.random.default_rng(0).normal(0, 1, len(t)) * (np.sin(2 * np.pi * 0.5 * t) > 0.9)
+    return (buzz * 0.12 + crackle * 0.02).astype(np.float32)
+
+
+HUM = _hum()

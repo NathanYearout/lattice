@@ -8,13 +8,14 @@ from pathlib import Path
 import pygfx as gfx
 import watchfiles
 
+from . import audio
 from .world import World
 
 KEYS = {" ": "space", "arrowup": "up", "arrowdown": "down", "arrowleft": "left", "arrowright": "right"}
 
 
 class Runtime:
-    def __init__(self, path, renderer, log=lambda level, msg: print(msg)):
+    def __init__(self, path, renderer, log=lambda level, msg: print(msg), canvas=None):
         self.path, self.log, self.game, self.error = Path(path).resolve(), log, None, None
         scene, camera = gfx.Scene(), gfx.PerspectiveCamera(60, depth_range=(0.1, 2000))
         sun = gfx.DirectionalLight(intensity=2.5, cast_shadow=True)
@@ -29,7 +30,7 @@ class Runtime:
         self.hud, self.hud_camera = gfx.Scene().add(self.text), gfx.ScreenCoordsCamera(invert_y=True)
 
         self.world = w = World(scene, camera, renderer)
-        w.sun, w.background, w.ambient, w.text = sun, background, ambient, self.text
+        w.sun, w.background, w.ambient, w.text, w.canvas, w.root = sun, background, ambient, self.text, canvas, self.path.parent
         w._engine = set(vars(w)) | {"_engine"}  # everything else on `w` is game state (snapshotted on Play)
         self.changed, self._stop = threading.Event(), threading.Event()
         watch = lambda: [self.changed.set() for _ in watchfiles.watch(self.path.parent, stop_event=self._stop)]
@@ -59,9 +60,11 @@ class Runtime:
             return self.log("error", self.error)
         self.call("scene", self.world)  # appearance: re-run on every save
         if reset:  # initial state: only on start / restart
+            audio.mixer.stop_all()
             [k.clear() for k in self.world.kinds.values()]
             self.call("setup", self.world)
-            self.world.load(self.scene_file) if self.scene_file.exists() else None
+            if self.scene_file.exists():
+                self.world.load(self.scene_file), self.world.files.add(self.scene_file)
         self.log("info", f"{'Loaded' if reset else 'Reloaded'} {self.path.name}")
 
     def poll(self):
@@ -75,13 +78,20 @@ class Runtime:
         if not self.error:
             self.call("update", w)
 
-    def render(self, camera=None, hud=True, renderer=None):
+    def render(self, camera=None, hud=True, renderer=None, consume_input=True):
         w, r = self.world, renderer or self.world.renderer
         for k in w.kinds.values():
             k.sync()
         self.text.set_markdown((self.error or w.hud) if hud else "")
-        r.render(w.scene, camera or w.camera, flush=False)
-        r.render(self.hud, self.hud_camera)
+        try:  # effect passes compile on flush, in the HUD render
+            r.render(w.scene, camera or w.camera, flush=False)
+            r.render(self.hud, self.hud_camera)
+        except Exception:  # most likely a broken custom shader: drop the effects so the scene stays visible
+            self.error = "**render failed** (fix and save to resume)\n\n" + traceback.format_exc(limit=-2)
+            self.log("error", self.error)
+            r.effect_passes = w.renderer.effect_passes = ()
+        if not consume_input:
+            return
         w.pressed.clear(), w.clicked.clear()
         w.mouse_delta = (0.0, 0.0)
 
@@ -91,6 +101,7 @@ class Runtime:
         key = KEYS.get(k := str(e.get("key", "")).lower(), k)
         if kind == "key_down":
             w.keys.add(key), w.pressed.add(key)
+            w.capture_mouse(False) if key == "escape" else None  # Esc always frees the cursor, whatever the game does
         elif kind == "key_up":
             w.keys.discard(key)
         elif kind == "pointer_down":
@@ -104,5 +115,6 @@ class Runtime:
 
     def close(self):
         self._stop.set()
+        audio.mixer.stop_all()
         for k in self.world.kinds.values():
             self.world.scene.remove(k.obj)

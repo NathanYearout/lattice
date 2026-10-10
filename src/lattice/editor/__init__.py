@@ -15,8 +15,10 @@ from imgui_bundle import imgui_color_text_edit as ed
 from imgui_bundle import portable_file_dialogs as pfd
 from wgpu.utils.imgui import ImguiRenderer
 
+from .. import audio, fx, shot
 from .. import icons as I
 from ..app import style_window
+from ..world import MATERIALS, convert
 from ..runtime import Runtime
 from . import theme
 from .theme import Fonts, hex4
@@ -117,7 +119,11 @@ class Editor:
         self.recent = json.loads((HOME / "recent.json").read_text()) if (HOME / "recent.json").exists() else []
         self.last, self.focus_viewport = time.perf_counter(), True
         self.ensure_target((1280, 720))
-        self.canvas.add_event_handler(self.on_event, "key_down", "key_up", "pointer_down", "pointer_up", "pointer_move")
+        self.canvas.add_event_handler(self.on_event, "key_down", "key_up", "pointer_down", "pointer_up", "pointer_move", order=-100)
+        if window := getattr(self.canvas, "_window", None):  # drop a game or a playable screenshot onto the window
+            import glfw
+
+            glfw.set_drop_callback(window, lambda _, paths: setattr(self, "dropped", paths[0]))
         self.gui.set_gui(self.frame)
         self.open(path) if path else None
 
@@ -133,20 +139,28 @@ class Editor:
 
     # ------------------------------------------------------------------ project
     def open(self, path):
-        path = Path(path).resolve()
+        path, playable = Path(path).resolve(), shot.is_shot(path)
+        path = shot.unpack(path) if playable else path
         if self.rt:
             self.stop() if self.mode != "edit" else None
             self.rt.close()
         size, self.size, self.renderer = self.size, (0, 0), None
         self.ensure_target(size)  # fresh renderers: no look leaks from the previous game
-        self.rt, self.selected, self.undo, self.redo = Runtime(path, self.renderer, self.console.log), None, [], []
+        self.rt, self.selected, self.undo, self.redo = Runtime(path, self.renderer, self.console.log, self.canvas), None, [], []
         self.rt.world.scene.add(self.grid, self.box)
+        cam = self.rt.world.camera  # the Scene view starts where the game camera looks from
+        f = la.vec_transform_quat((0, 0, -1), cam.local.rotation)
+        self.cam_pos, self.yaw, self.pitch = np.array(cam.local.position, float), float(np.arctan2(-f[0], -f[2])), float(np.arcsin(f[1]))
         self.recent = [str(path)] + [p for p in self.recent if p != str(path)][:7]
         (HOME / "recent.json").write_text(json.dumps(self.recent))
         self.canvas.set_title(f"Lattice · {path.name}")
         self.edit_script(path)
         self.focus_viewport = True
         self.toast(I.FOLDER_OPEN, f"Opened {path.name}")
+        if playable:  # straight back into the captured moment; Stop returns to it
+            shot.resume(self.rt)
+            self.play()
+            self.toast(I.CAMERA, "Resumed from a playable screenshot")
 
     def new_game(self):
         if target := pfd.save_file("New game", str(Path.cwd() / "my_game.py"), ["Python", "*.py"]).result():
@@ -155,7 +169,7 @@ class Editor:
             self.open(target)
 
     def open_dialog(self):
-        if files := pfd.open_file("Open game", str(EXAMPLES if EXAMPLES.exists() else Path.cwd()), ["Python", "*.py"]).result():
+        if files := pfd.open_file("Open game", str(EXAMPLES if EXAMPLES.exists() else Path.cwd()), ["Games", "*.py *.png"]).result():
             self.open(files[0])
 
     def toast(self, icon, text, color=theme.ACCENT):
@@ -178,7 +192,14 @@ class Editor:
             self.rt.world.restore(self.play_state)
             self.mode, self.view = "edit", "scene"
             w = self.rt.world
-            w.keys.clear(), w.buttons.clear()
+            w.keys.clear(), w.buttons.clear(), w.capture_mouse(False), audio.mixer.stop_all()
+
+    def screenshot(self):
+        if self.rt:
+            self.grid.visible = self.box.visible = False
+            path = shot.save(self.rt, size=self.size)
+            self.toast(I.CAMERA, f"Playable screenshot ï¿½ {path.name}", theme.OK)
+            self.console.log("info", f"Saved {path}  (open it in Lattice to play from this moment)")
 
     def checkpoint(self):
         if self.rt and self.mode == "edit":
@@ -219,6 +240,8 @@ class Editor:
         """Raw canvas events go to the game only while it is playing and the viewport has the mouse/keyboard."""
         if self.rt and self.mode == "play" and getattr(self, "viewport_focused", False):
             self.rt.feed(e, getattr(self, "viewport_origin", (0, 0)))
+        elif self.rt and e["event_type"] == "key_down" and str(e.get("key")).lower() == "escape":
+            self.rt.world.capture_mouse(False)
 
     def shortcuts(self):
         io = imgui.get_io()
@@ -232,6 +255,8 @@ class Editor:
             self.new_game()
         if ctrl and pressed(imgui.Key.o):
             self.open_dialog()
+        if pressed(imgui.Key.f12):
+            self.screenshot()
         if typing or self.mode != "edit":
             return
         if ctrl and pressed(imgui.Key.z):
@@ -262,6 +287,10 @@ class Editor:
         gz.begin_frame()
         self.viewport_hovered = getattr(self, "viewport_hovered", False)
         self.script_focused = getattr(self, "script_focused", False)
+        if path := getattr(self, "dropped", None):
+            self.dropped = None
+            self.open(path)
+        audio.mixer.paused = self.mode != "play"
         if self.rt:
             self.rt.poll()
             if self.mode == "play":
@@ -333,6 +362,8 @@ class Editor:
             imgui.separator()
             if item(f"{I.SAVE}  Save Scene", "Ctrl+S", bool(self.rt)):
                 self.save_scene()
+            if item(f"{I.CAMERA}  Playable Screenshot", "F12", bool(self.rt)):
+                self.screenshot()
             if item(f"{I.REFRESH_CW}  Restart Game", "", bool(self.rt)):
                 self.stop(), self.rt.reload(reset=True)
             imgui.separator()
@@ -394,6 +425,9 @@ class Editor:
         if icon_button(I.STEP_FORWARD, "Step one frame") and self.rt and playing:
             self.mode = "paused"
             self.rt.step(1 / 60)
+        imgui.same_line(), imgui.dummy(imgui.ImVec2(8, 0)), imgui.same_line()
+        if icon_button(I.CAMERA, "Playable screenshot (F12): a PNG that resumes this exact moment") and self.rt:
+            self.screenshot()
         # stats on the right
         if self.rt:
             w = self.rt.world
@@ -651,9 +685,66 @@ class Editor:
                 self.entity_inspector(*sel)
             elif kind is not None:
                 self.kind_inspector(self.selected[0], kind)
-            else:
-                imgui.text_colored(hex4(theme.FAINT), "Select something in the viewport\nor the hierarchy.")
+            elif self.rt:
+                self.render_inspector()
         imgui.end()
+
+    def render_inspector(self):
+        """With nothing selected the Inspector edits the game's look: resolution, filtering and the post-effect stack."""
+        r = self.renderer
+        self.header(I.APERTURE, "Rendering", "nothing selected")
+        imgui.text_colored(hex4(theme.DIM), "Pixel size")
+        imgui.same_line(96), imgui.set_next_item_width(-1)
+        changed, ratio = imgui.slider_float("##ratio", float(r.pixel_ratio), 0.1, 1.0, "%.2f")
+        r.pixel_ratio = ratio if changed else r.pixel_ratio
+        if imgui.checkbox("Crisp pixels (nearest)", r.pixel_filter == "nearest")[0]:
+            r.pixel_filter = "linear" if r.pixel_filter == "nearest" else "nearest"
+        imgui.text_colored(hex4(theme.DIM), "Style"), imgui.same_line(96), imgui.set_next_item_width(-1)
+        if imgui.begin_combo("##style", getattr(self.rt.world, "style", "custom")):
+            for name in fx.STYLES:
+                if imgui.selectable(name, False)[0]:
+                    fx.style(self.rt.world, name)
+                    imgui.set_clipboard_text(f'fx.style(w, "{name}")')
+                    self.toast(I.PAINTBRUSH, f'Style "{name}" · code copied, paste it into scene() to keep it')
+            imgui.end_combo()
+        imgui.dummy(imgui.ImVec2(0, 4))
+        imgui.separator_text(f"{I.WAND_SPARKLES}  Post effects")
+        aa = [p for p in r.effect_passes if isinstance(p, fx.PPAAPass)]
+        passes = [p for p in r.effect_passes if not isinstance(p, fx.PPAAPass)]
+        for i, p in enumerate(passes):
+            imgui.push_id(i)
+            p.enabled = imgui.checkbox(f"##on", p.enabled)[1]
+            imgui.same_line()
+            name = getattr(p, "preset", type(p).__name__.replace("Pass", ""))
+            if imgui.tree_node_ex(f"{name}###fx", imgui.TreeNodeFlags_.span_avail_width):
+                for u in p._uniform_data.dtype.names:
+                    if u in ("time", "t") or u.startswith("_"):
+                        continue
+                    v = p._uniform_data[u]
+                    imgui.text_colored(hex4(theme.DIM), u.replace("_", " ")[:11]), imgui.same_line(96), imgui.set_next_item_width(-1)
+                    if "color" in u or u == "tint":
+                        changed, out = imgui.color_edit4(f"##{u}", list(map(float, v)), imgui.ColorEditFlags_.float)
+                    elif np.size(v) == 1:
+                        changed, out = imgui.drag_float(f"##{u}", float(v), max(abs(float(v)), 0.01) * 0.01)
+                    else:
+                        changed, out = getattr(imgui, f"drag_float{np.size(v)}")(f"##{u}", list(map(float, v)), 0.01)
+                    if changed:
+                        p._uniform_data[u] = out
+                imgui.tree_pop()
+            imgui.same_line(imgui.get_window_width() - 36)
+            if imgui.small_button(I.X):
+                passes.remove(p)
+            imgui.pop_id()
+        imgui.set_next_item_width(-1)
+        if imgui.begin_combo("##add", f"{I.PLUS}  Add effect"):
+            for name, make in fx.PRESETS.items():
+                if imgui.selectable(name, False)[0]:
+                    (p := make()).preset = name
+                    passes.append(p)
+            imgui.end_combo()
+        if passes + aa != list(r.effect_passes):
+            r.effect_passes = passes + aa
+        imgui.text_colored(hex4(theme.FAINT), "Live preview. Keep it in scene():\nw.renderer.effect_passes = [fx.bloom(), ...]")
 
     def header(self, icon, title, sub):
         imgui.push_font(Fonts.bold, 0)
@@ -687,7 +778,11 @@ class Editor:
         extra = [c for c in k._cols if c not in ("pos", "rot", "scale")]
         if extra and imgui.collapsing_header(f"{I.CPU}  Data", imgui.TreeNodeFlags_.default_open):
             for c in extra:
-                if (v := self.field(c, k._cols[c][i])) is not None:
+                if c == "tint":
+                    imgui.text_colored(hex4(theme.DIM), "tint"), imgui.same_line(96), imgui.set_next_item_width(-1)
+                    changed, rgb = imgui.color_edit3("##tint", k.tint[i].tolist(), imgui.ColorEditFlags_.float)
+                    k.tint[i] = rgb if changed else k.tint[i]
+                elif (v := self.field(c, k._cols[c][i])) is not None:
                     k._cols[c][i] = v
         self.material_inspector(name, k)
         imgui.dummy(imgui.ImVec2(0, 8))
@@ -715,7 +810,13 @@ class Editor:
         m = k.material
         if not imgui.collapsing_header(f"{I.PALETTE}  Material", imgui.TreeNodeFlags_.default_open):
             return
-        imgui.text_colored(hex4(theme.FAINT), type(m).__name__)
+        names = {cls: name for name, cls in MATERIALS.items()}
+        imgui.text_colored(hex4(theme.DIM), "Shading"), imgui.same_line(96), imgui.set_next_item_width(-1)
+        if imgui.begin_combo("##shading", names.get(type(m), type(m).__name__)):
+            for name, cls in MATERIALS.items():
+                if imgui.selectable(name, type(m) is cls)[0] and type(m) is not cls:
+                    k.material = k.obj.material = m = convert(m, cls)
+            imgui.end_combo()
         for attr in ("color", "emissive"):
             if hasattr(m, attr):
                 imgui.text_colored(hex4(theme.DIM), attr.title())

@@ -60,5 +60,15 @@ MAXIMIZE_2 = "\ue113"
 COMMAND = "\ue09a"
 FLAME = "\ue0d2"
 LAYOUT_DASHBOARD = "\ue1c1"
+CAMERA = "\ue064"
+IMAGE = "\ue0f6"
+APERTURE = "\ue040"
+BUILDING_2 = "\ue290"
+MOUNTAIN = "\ue231"
+WAND_SPARKLES = "\ue357"
+VOLUME_2 = "\ue1ab"
+BLEND = "\ue59c"
+PAINTBRUSH = "\ue2e7"
+FILM = "\ue0d0"
 
-RANGE = (0xE038, 0xE529)
+RANGE = (0xE038, 0xE59C)
