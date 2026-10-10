@@ -74,7 +74,7 @@ The demo galaxy simulates **30,000 tumbling, orbiting entities in 3 draw calls**
 You need [uv](https://docs.astral.sh/uv/) and a GPU with Vulkan, Metal or DX12 support.
 
 ```sh
-git clone <this repo> lattice && cd lattice
+git clone https://github.com/NathanYearout/lattice.git && cd lattice
 uv sync
 
 uv run lattice                          # open the editor
