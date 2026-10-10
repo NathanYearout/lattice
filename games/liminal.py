@@ -88,12 +88,7 @@ def walk(w, forward, right):
     move = forward * keys("w", "s") + right * keys("d", "a")
     speed = 5.5 if "shift" in w.keys else 3.0
     w.me += move / max(np.linalg.norm(move), 1) * speed * w.dt
-    walls = w.wall  # push out of every wall at once: closest point on each AABB, in the xz plane
-    nearest = np.clip(w.me, walls.pos - walls.scale / 2, walls.pos + walls.scale / 2)
-    away = (w.me - nearest) * (1, 0, 1)
-    dist = np.linalg.norm(away, axis=1, keepdims=True)
-    hit = dist[:, 0] < RADIUS
-    w.me += (away[hit] / np.maximum(dist[hit], 1e-6) * (RADIUS - dist[hit])).sum(0)
+    w.me, _ = w.push_out(w.me, "wall", RADIUS)  # slide along every wall and pillar at once
     bob = np.sin(w.clock * 9) * 0.035 * min(np.linalg.norm(move), 1)
     w.camera.local.position = w.torch.local.position = w.me + (0, bob, 0)
     w.camera.local.rotation = la.quat_mul(la.quat_from_axis_angle((0, 1, 0), w.yaw), la.quat_from_axis_angle((1, 0, 0), w.pitch))

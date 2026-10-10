@@ -8,7 +8,7 @@ import pygfx as gfx
 from pygfx.renderers.wgpu import load_wgsl
 from pygfx.renderers.wgpu.shaders import meshshader
 
-from . import audio
+from . import audio, collide
 
 
 def _copy(value):  # plain data is copied; GPU objects and the like are shared
@@ -29,6 +29,8 @@ def convert(material, cls):
         except (AttributeError, TypeError, ValueError):
             pass
     return new
+
+
 BASE = dict(pos=(0.0, 0, 0), vel=(0.0, 0, 0), rot=(0.0, 0, 0, 1), scale=(1.0, 1, 1), tint=(1.0, 1, 1))
 TINT = {  # anchor line in pygfx's mesh.wgsl -> code inserted after it
     "    global_id: u32,": "shade_r: f32, shade_g: f32, shade_b: f32,",
@@ -76,11 +78,19 @@ class Kind:
 
     def look(self, geometry, material, columns, shadow=True):
         """(Re)declare appearance and columns; existing entity data is kept (this is what makes hot reload work)."""
-        self.geometry, self.material, self.shadow = geometry, material, shadow
+        self.geometry, self.material, self.shadow, self._bounds = geometry, material, shadow, None
         for name, default in {**BASE, **columns}.items():
             self._defaults[name] = np.asarray(default, np.float32)
             self._cols.setdefault(name, None)
         self._grow(self._cap or 64)
+
+    @property
+    def bounds(self):
+        """The geometry's local (min, max) corners: each instance's collision box before its pos/rot/scale."""
+        if self._bounds is None:
+            p = self.geometry.positions.data
+            self._bounds = (p.min(0).astype(float), p.max(0).astype(float))
+        return self._bounds
 
     @property
     def _cap(self):
@@ -125,12 +135,7 @@ class Kind:
         self.obj.visible = n > 0
         if not n:
             return
-        q = self.rot / np.linalg.norm(self.rot, axis=1, keepdims=True)
-        x, y, z, w = q.T
-        r = np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
-                      2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
-                      2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)], -1).reshape(n, 3, 3)
-        m = buf.data["matrix"]  # stored column-major, i.e. transposed
+        r, m = collide.rotations(self.rot), buf.data["matrix"]  # stored column-major, i.e. transposed
         m[:n, :3, :3] = (r * self.scale[:, None, :]).transpose(0, 2, 1)
         m[:n, 3, :3] = self.pos
         buf.data["_12_bytes_padding"][:n].view(np.float32)[:] = 1 - np.clip(self.tint, 0, None) ** 2.2  # sRGB in, linear out
@@ -147,6 +152,7 @@ class World:
         self.keys, self.pressed, self.buttons, self.clicked, self.mouse = set(), set(), set(), set(), (0.0, 0.0)
         self.mouse_delta = (0.0, 0.0)
         self._controller, self.root, self.files, self.canvas = None, Path.cwd(), set(), None
+        self._engine = set(vars(self)) | {"_engine"}  # everything set later is game state (the Runtime extends this)
 
     def __getattr__(self, name):
         if name in (kinds := self.__dict__.get("kinds", {})):
@@ -209,7 +215,7 @@ class World:
     def restore(self, snapshot):
         tables, attrs = snapshot
         for name, cols in tables.items():
-            if k := self.kinds.get(name):
+            if (k := self.kinds.get(name)) is not None:  # an empty kind is falsy (len 0) but must still restore
                 k.clear()
                 k.spawn(len(cols["pos"]), **cols)
         vars(self).update({key: _copy(v) for key, v in attrs.items()})
@@ -224,6 +230,33 @@ class World:
                 kind, col = key.split(".", 1)
                 tables.setdefault(kind, {})[col] = f[key]
         self.restore((tables, {}))
+
+    # collision: kinds may be given as objects or names
+    def _kind(self, k):
+        return self.kinds[k] if isinstance(k, str) else k
+
+    def raycast(self, origin, direction, kinds=None, max_dist=np.inf):
+        """The nearest hit along a ray against the oriented boxes of ``kinds`` (default: all), or None. A hit has
+        ``.kind``, ``.index``, ``.dist``, ``.point`` and ``.normal``. Mouse picking: ``w.raycast(*w.mouse_ray())``."""
+        names = kinds if kinds is not None else self.kinds
+        names = [names] if isinstance(names, str) else names
+        return collide.raycast({n: self.kinds[n] for n in names}, origin, direction, max_dist)
+
+    def overlaps(self, a, b, radius_a=None, radius_b=None):
+        """Index arrays ``(i, j)`` of touching pairs between two kinds, as spheres (radius defaults to each box's largest
+        half extent): ``i, j = w.overlaps("bullet", "enemy"); w.enemy.hp[j] -= 1; w.bullet.kill(i)``."""
+        return collide.overlaps(self._kind(a), self._kind(b), radius_a, radius_b)
+
+    def push_out(self, mover, walls, radius=0.5):
+        """Slide spheres out of solid oriented boxes. ``mover`` is a kind (moved in place) or an (n, 3) / (3,) array (a
+        moved copy is returned). Returns ``(positions, normals)``; a normal is zero where nothing was touched and points
+        away from the wall otherwise, so ``normals[:, 1] > 0.7`` means standing on something."""
+        k = self._kind(mover)
+        points = k.pos if isinstance(k, Kind) else np.asarray(k, float)
+        pos, normal = collide.push_out(points, radius, self._kind(walls))
+        if isinstance(k, Kind):
+            k.pos = pos
+        return (pos, normal) if points.ndim == 2 else (pos[0], normal[0])
 
     def orbit(self, target=(0, 0, 0)):
         """Mouse orbit/zoom camera control (created once, survives reloads)."""
