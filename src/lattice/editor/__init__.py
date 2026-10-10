@@ -16,6 +16,7 @@ from imgui_bundle import portable_file_dialogs as pfd
 from wgpu.utils.imgui import ImguiRenderer
 
 from .. import icons as I
+from ..app import style_window
 from ..runtime import Runtime
 from . import theme
 from .theme import Fonts, hex4
@@ -94,6 +95,7 @@ class Editor:
             from rendercanvas.glfw import RenderCanvas
         self.snapshot = snapshot
         self.canvas = RenderCanvas(size=(1600, 940), title="Lattice", update_mode="continuous", max_fps=144)
+        style_window(self.canvas)
         self.gui = ImguiRenderer(gfx.renderers.wgpu.get_shared().device, self.canvas)
         HOME.mkdir(exist_ok=True)
         imgui.get_io().set_ini_filename(str(HOME / "layout.ini"))
@@ -416,10 +418,16 @@ class Editor:
     # ------------------------------------------------------------------ viewport
     LOOK = ("pixel_ratio", "pixel_filter", "ppaa", "effect_passes")
 
-    def ensure_target(self, size):
-        """One render target per view: Game is exactly what players see, Scene is a clean, lit editing view."""
-        size = (max(int(size[0]), 16), max(int(size[1]), 16))
+    def ensure_target(self, size, settle=0.12):
+        """One render target per view: Game is exactly what players see, Scene is a clean, lit editing view.
+
+        While the window is being resized the last frame is stretched; targets are rebuilt once the size settles."""
+        size, now = (max(int(size[0]), 16), max(int(size[1]), 16)), time.perf_counter()
         if size == self.size:
+            return
+        if self.renderer and not self.snapshot and (size != getattr(self, "_pending", None) or now - self._pending_t < settle):
+            if size != getattr(self, "_pending", None):
+                self._pending, self._pending_t = size, now
             return
         old, self.size = self.renderer, size
         self.targets = {v: gfx.Texture(dim=2, size=(*size, 1), format="rgba8unorm") for v in ("scene", "game")}
@@ -463,7 +471,7 @@ class Editor:
             ambient.intensity = game_ambient
             if self.view not in self.texs:
                 self.texs[self.view] = self.gui.backend.register_texture(self.targets[self.view]._wgpu_default_view)
-            imgui.image(self.texs[self.view], imgui.ImVec2(*self.size))
+            imgui.image(self.texs[self.view], imgui.get_content_region_avail())
             self.viewport_hovered = imgui.is_item_hovered()
             self.viewport_focused = self.viewport_hovered or imgui.is_window_focused()
             if scene_view:

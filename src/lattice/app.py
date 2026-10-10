@@ -1,11 +1,26 @@
 """Command line: ``lattice`` opens the editor, ``lattice play game.py`` runs a game in a plain window."""
 
 import argparse
+import os
 import time
 
 import pygfx as gfx
 
 from .runtime import Runtime
+
+
+def style_window(canvas, color=0x0D0B0B):
+    """Windows 11: tint the title bar and border to the theme, and paint exposed areas black instead of white."""
+    if os.name != "nt" or not (window := getattr(canvas, "_window", None)):
+        return
+    import ctypes
+
+    import glfw
+
+    hwnd, dwm, c = glfw.get_win32_window(window), ctypes.windll.dwmapi, ctypes.c_int(color)  # COLORREF is 0x00BBGGRR
+    for attribute, value in ((20, ctypes.c_int(1)), (35, c), (34, c)):  # dark mode, caption colour, border colour
+        dwm.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value), 4)
+    ctypes.windll.user32.SetClassLongPtrW(hwnd, -10, ctypes.windll.gdi32.GetStockObject(4))  # GCLP_HBRBACKGROUND = black
 
 
 def play(path, snapshot=None, frames=180, size=(1280, 720)):
@@ -14,6 +29,7 @@ def play(path, snapshot=None, frames=180, size=(1280, 720)):
     else:
         from rendercanvas.glfw import RenderCanvas, loop
     canvas = RenderCanvas(size=size, title="lattice · $fps fps", update_mode="continuous", max_fps=240)
+    style_window(canvas, 0)
     rt = Runtime(path, gfx.WgpuRenderer(canvas))
     last = [time.perf_counter()]
 

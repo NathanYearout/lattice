@@ -43,8 +43,8 @@ def apply():
             io.fonts.add_font_from_file_ttf(str(ASSETS / "lucide.ttf"), size, cfg)
         return f
 
-    Fonts.ui = font("IBMPlexSans-Medium.ttf", 15)
-    Fonts.bold = font("IBMPlexSans-SemiBold.ttf", 15)
+    Fonts.ui = font("IBMPlexSans-Medium.ttf", 16)
+    Fonts.bold = font("IBMPlexSans-SemiBold.ttf", 16)
     Fonts.mono = font("IBMPlexMono-Regular.ttf", 14)
     Fonts.title = font("IBMPlexSans-SemiBold.ttf", 44, with_icons=False)
     io.font_default = Fonts.ui
