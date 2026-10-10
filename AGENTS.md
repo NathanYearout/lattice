@@ -36,6 +36,7 @@ def update(w): ...  # per-frame logic. Only runs while playing.
 - `w.model("thing.glb")` returns `dict(geometry=..., material=...)` for the first mesh, so use `w.kind("thing", **w.model("thing.glb"))`. Scale is the model's own; glTF files are often in centimetres.
 - `w.play(sound, volume=1, loop=False, key=None)` plays a file path (wav/ogg/flac/mp3) or a NumPy array (mono or stereo, 44.1 kHz), and returns a voice with `.volume` and `.stop()`. With a `key`, later calls return the already-playing voice, so `w.play(HUM, loop=True, key="hum").volume = x` is safe every frame.
 - Files loaded through these functions are cached until they change, and they are packed into playable screenshots.
+- Users record or drop sounds into `<game>/sounds/` from the editor. Prefer `w.play("sounds/x.wav")` when a file exists. When synthesising, keep ambience soft: filter the noise (no raw white noise), loop it seamlessly (whole cycles per loop) and keep peaks around 0.2.
 
 ## Look: `from lattice import fx`
 - `fx.style(w, name)`, at the end of `scene()`, applies a whole art direction: `realistic`, `source`, `cel`, `ps2`, `ps1`, `n64`, `vhs`, `noir`, `gameboy` or `synthwave`. Fog passes you added yourself are kept.

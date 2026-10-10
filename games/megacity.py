@@ -155,18 +155,21 @@ def update(w, dt=None):
 
     clock = 2 * 60 + 13 + int(w.t / 4)
     w.hud = f"**NEO-TOKYO**  ·  {clock // 60:02d}:{clock % 60:02d}  ·  {sum(map(len, w.kinds.values())):,} lights in the rain"
-    w.play(RAIN, volume=0.35, loop=True, key="rain")
+    w.play(RAIN, volume=0.6, loop=True, key="rain")
 
 
-def _rain_sound(seconds=4.0, rate=44100):
-    """Brown-ish noise with a soft low hum: rain on concrete under a city that never sleeps. Loops seamlessly."""
-    rng = np.random.default_rng(1)
-    white = rng.normal(0, 1, (int(seconds * rate), 2))
-    spectrum = np.fft.rfft(white, axis=0) / np.sqrt(np.arange(1, white.shape[0] // 2 + 2))[:, None] ** 0.8
-    noise = np.fft.irfft(spectrum, n=white.shape[0], axis=0)
-    t = np.arange(white.shape[0]) / rate
-    hum = 0.15 * np.sin(2 * np.pi * 55 * t)[:, None]
-    return (noise / np.abs(noise).max() * 0.6 + hum) * 0.5
+def _ambience(seconds=8.0, rate=44100):
+    """Soft rain (noise shaped to a gentle low-mid band) under a slow, warm Am9 synth pad. Every partial completes whole
+    cycles in ``seconds``, so the loop is seamless. Drop your own recording on the editor and play that instead."""
+    n, rng = int(seconds * rate), np.random.default_rng(1)
+    f = np.fft.rfftfreq(n, 1 / rate)[:, None]
+    band = 1 / (1 + (f / 900) ** 2) / (1 + (90 / np.maximum(f, 1)) ** 2)  # low-pass ~900 Hz, high-pass ~90 Hz
+    rain = np.fft.irfft(np.fft.rfft(rng.normal(0, 1, (n, 2)), axis=0) * band, n=n, axis=0)
+    t = np.arange(n)[:, None] / rate
+    chord = np.round(np.array([110.0, 130.81, 164.81, 196.0, 246.94]) * seconds) / seconds  # A C E G B
+    pad = sum(np.sin(2 * np.pi * hz * t + (0, 0.7)) + 0.5 * np.sin(2 * np.pi * (hz + 1 / seconds) * t) for hz in chord)
+    swell = 0.6 + 0.4 * np.sin(2 * np.pi * t / seconds)
+    return (rain / np.abs(rain).max() * 0.18 + pad / 7.5 * 0.12 * swell).astype(np.float32)
 
 
-RAIN = _rain_sound()
+RAIN = _ambience()

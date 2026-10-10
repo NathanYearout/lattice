@@ -70,5 +70,9 @@ VOLUME_2 = "\ue1ab"
 BLEND = "\ue59c"
 PAINTBRUSH = "\ue2e7"
 FILM = "\ue0d0"
+MIC = "\ue118"
+SQUARE = "\ue167"
+AUDIO_LINES = "\ue55a"
+MUSIC = "\ue122"
 
 RANGE = (0xE038, 0xE59C)

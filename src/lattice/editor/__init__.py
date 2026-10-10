@@ -193,7 +193,17 @@ class Editor:
             self.rt.world.restore(self.play_state)
             self.mode, self.view = "edit", "scene"
             w = self.rt.world
-            w.keys.clear(), w.buttons.clear(), w.capture_mouse(False), audio.mixer.stop_all()
+            w.keys.clear(), w.buttons.clear(), w.capture_mouse(False), audio.mixer.stop_all(previews=False)
+
+    def import_sound(self, path):
+        """Dropped audio files are copied into <game>/sounds/ and their play() call is put on the clipboard."""
+        if not self.rt:
+            return self.toast(I.CIRCLE_ALERT, "Open a game first, then drop sounds onto it", theme.WARN)
+        target = self.rt.path.parent / "sounds" / path.name
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(path.read_bytes()) if path.resolve() != target.resolve() else None
+        self.copy_play(target)
+        self.preview(target)
 
     def screenshot(self):
         if self.rt:
@@ -290,7 +300,7 @@ class Editor:
         self.script_focused = getattr(self, "script_focused", False)
         if path := getattr(self, "dropped", None):
             self.dropped = None
-            self.open(path)
+            self.import_sound(Path(path)) if Path(path).suffix.lower() in audio.FILES else self.open(path)
         audio.mixer.paused = self.mode != "play"
         if self.rt:
             self.rt.poll()
@@ -849,25 +859,81 @@ class Editor:
             imgui.same_line()
             if icon_button(I.FOLDER_OPEN, "Show in Explorer", size=26) and os.name == "nt":
                 os.startfile(folder)
+            imgui.same_line()
+            self.record_button(folder)
             imgui.same_line(), imgui.text_colored(hex4(theme.FAINT), str(folder))
             imgui.separator()
-            for f in sorted(folder.iterdir()) if folder.exists() else ():
-                if f.name.startswith((".", "__")):
-                    continue
-                icon = I.FILE_CODE if f.suffix == ".py" else I.PACKAGE if f.suffix == ".npz" else I.FILE
-                current = self.rt and f == self.rt.path
-                imgui.push_style_color(imgui.Col_.text, hex4(theme.ACCENT if current else theme.TEXT))
-                if imgui.selectable(f"{icon}  {f.name}", bool(current), imgui.SelectableFlags_.allow_double_click)[0]:
-                    if imgui.is_mouse_double_clicked(imgui.MouseButton_.left) and f.suffix == ".py":
-                        self.edit_script(f)
-                imgui.pop_style_color()
-                if f.suffix == ".py" and imgui.begin_popup_context_item(f"ctx{f.name}"):
-                    if imgui.menu_item(f"{I.PLAY}  Open as game", "", False)[0]:
-                        self.open(f)
-                    if imgui.menu_item(f"{I.CODE}  Edit script", "", False)[0]:
-                        self.edit_script(f)
-                    imgui.end_popup()
+            self.files(folder)
         imgui.end()
+
+    def files(self, folder):
+        """The project tree. Scripts open on double-click; sounds preview on click and copy their play() call."""
+        for f in sorted(folder.iterdir(), key=lambda f: (f.is_file(), f.name)) if folder.exists() else ():
+            if f.name.startswith((".", "__")):
+                continue
+            if f.is_dir():
+                if imgui.tree_node_ex(f"{I.FOLDER}  {f.name}###{f}", imgui.TreeNodeFlags_.span_avail_width):
+                    self.files(f)
+                    imgui.tree_pop()
+                continue
+            sound = f.suffix.lower() in audio.FILES
+            icon = I.FILE_CODE if f.suffix == ".py" else I.PACKAGE if f.suffix == ".npz" else I.MUSIC if sound else I.FILE
+            current = self.rt and f == self.rt.path
+            imgui.push_style_color(imgui.Col_.text, hex4(theme.ACCENT if current else theme.TEXT))
+            if imgui.selectable(f"{icon}  {f.name}###{f}", bool(current), imgui.SelectableFlags_.allow_double_click)[0]:
+                if imgui.is_mouse_double_clicked(imgui.MouseButton_.left) and f.suffix == ".py":
+                    self.edit_script(f)
+                if sound:
+                    self.preview(f)
+            imgui.pop_style_color()
+            if sound and imgui.is_item_hovered(imgui.HoveredFlags_.delay_short):
+                imgui.set_tooltip("Click to preview · right-click for code")
+            if (f.suffix == ".py" or sound) and imgui.begin_popup_context_item(f"ctx{f}"):
+                if f.suffix == ".py" and imgui.menu_item(f"{I.PLAY}  Open as game", "", False)[0]:
+                    self.open(f)
+                if f.suffix == ".py" and imgui.menu_item(f"{I.CODE}  Edit script", "", False)[0]:
+                    self.edit_script(f)
+                if sound and imgui.menu_item(f"{I.PLAY}  Preview", "", False)[0]:
+                    self.preview(f)
+                if sound and imgui.menu_item(f"{I.COPY}  Copy w.play(...)", "", False)[0]:
+                    self.copy_play(f)
+                imgui.end_popup()
+
+    def preview(self, path):
+        getattr(self, "_previewing", None) and self._previewing.stop()  # one preview at a time
+        try:
+            self._previewing = audio.mixer.play(audio.load(path), preview=True)
+        except Exception as e:
+            self.toast(I.CIRCLE_ALERT, f"Can't play {path.name}: {e}", theme.ERROR)
+
+    def copy_play(self, path):
+        rel = path.relative_to(self.rt.path.parent).as_posix() if self.rt and path.is_relative_to(self.rt.path.parent) else path.as_posix()
+        imgui.set_clipboard_text(f'w.play("{rel}")')
+        self.toast(I.CHECK, f'Copied w.play("{rel}")', theme.OK)
+
+    def record_button(self, folder):
+        """Record from the microphone into <game>/sounds/. Silence is trimmed and the level normalised on stop."""
+        rec = self.recorder = getattr(self, "recorder", None) or audio.Recorder()
+        if not rec.recording:
+            if icon_button(I.MIC, "Record a sound from the microphone", size=26):
+                try:
+                    rec.start()
+                except Exception as e:
+                    self.toast(I.CIRCLE_ALERT, f"No microphone: {e}", theme.ERROR)
+            return
+        if icon_button(I.SQUARE, "Stop and save", size=26, color=theme.ERROR):
+            path = rec.stop(folder / "sounds" / f"rec-{time.strftime('%H%M%S')}.wav")
+            self.copy_play(path)
+            self.preview(path)
+            return
+        imgui.same_line()
+        imgui.set_cursor_pos_y(imgui.get_cursor_pos_y() + 5)
+        imgui.text_colored(hex4(theme.ERROR), f"REC {rec.seconds:4.1f}s")
+        imgui.same_line()
+        imgui.set_cursor_pos_y(imgui.get_cursor_pos_y() + 12)
+        imgui.push_style_color(imgui.Col_.plot_histogram, hex4(theme.ERROR if rec.level > 0.95 else theme.OK))
+        imgui.progress_bar(min(rec.level, 1.0), imgui.ImVec2(90, 6), "")
+        imgui.pop_style_color()
 
     def console_window(self):
         if imgui.begin(f"{I.TERMINAL}  Console###Console", None, PANEL)[0]:

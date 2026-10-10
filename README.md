@@ -150,6 +150,8 @@ w.play("step.ogg")                                                         # fil
 w.play(hum_array, loop=True, key="hum").volume = dread                     # keyed: safe to call every frame
 ```
 
+**Sounds in the editor:** press the microphone button in the Project panel to record. Silence is trimmed, the level is normalised, and the take is saved to `sounds/`. You can also drop `.wav`/`.ogg`/`.flac`/`.mp3` files onto the window to copy them into the game. Either way you hear a preview, and `w.play("sounds/...")` is copied to your clipboard. Click any sound in the Project panel to preview it.
+
 ## How it works
 
 ```
